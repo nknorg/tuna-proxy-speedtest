@@ -17,6 +17,7 @@ var (
 )
 
 func main() {
+	numTests := flag.Int("n", 1, "number of tests")
 	seedHex := flag.String("s", "", "wallet secret seed")
 	outputFile := flag.String("o", "", "write result to file in unit of Kbps")
 	version := flag.Bool("version", false, "print version")
@@ -46,78 +47,91 @@ func main() {
 		}
 	}()
 
-	port, err := getFreePort()
-	if err != nil {
-		log.Fatal(err)
-	}
+	res := make([]float64, 0, *numTests)
 
-	tp, err := newTunaProxy(seed, port)
-	if err != nil {
-		log.Fatal(err)
-	}
+	for i := 0; i < *numTests; i++ {
+		port, err := getFreePort()
+		if err != nil {
+			log.Fatal(err)
+		}
 
-	defer tp.stop()
+		tp, err := newTunaProxy(seed, port)
+		if err != nil {
+			log.Fatal(err)
+		}
 
-	err = tp.start()
-	if err != nil {
-		log.Fatal(err)
-	}
+		err = tp.start()
+		if err != nil {
+			log.Fatal(err)
+		}
 
-	for i := 5; i > 0; i-- {
-		status = fmt.Sprintf("starting speedtest in %ds", i)
-		time.Sleep(time.Second)
-	}
+		for i := 5; i > 0; i-- {
+			status = fmt.Sprintf("starting speedtest in %ds", i)
+			time.Sleep(time.Second)
+		}
 
-	status = "starting speedtest"
+		status = "starting speedtest"
 
-	fastCom, err := fast.New(fmt.Sprintf("http://127.0.0.1:%d", port))
-	if err != nil {
-		log.Fatal(err)
-	}
+		fastCom, err := fast.New(fmt.Sprintf("http://127.0.0.1:%d", port))
+		if err != nil {
+			log.Fatal(err)
+		}
 
-	err = fastCom.Init()
-	if err != nil {
-		log.Fatal(err)
-		return
-	}
+		err = fastCom.Init()
+		if err != nil {
+			log.Fatal(err)
+			return
+		}
 
-	status = "connecting"
+		status = "connecting"
 
-	urls, err := fastCom.GetUrls()
-	if err != nil {
-		log.Fatal(err)
-		return
-	}
+		urls, err := fastCom.GetUrls()
+		if err != nil {
+			log.Fatal(err)
+			return
+		}
 
-	status = "loading"
+		status = "loading"
 
-	KbpsChan := make(chan float64)
-	done := make(chan struct{})
+		KbpsChan := make(chan float64)
+		done := make(chan struct{})
 
-	go func() {
 		var Kbps float64
-		for Kbps = range KbpsChan {
-			status = format(Kbps)
-		}
-
-		fmt.Printf("\r%c[2K -> %s\n", 27, status)
-
-		if len(*outputFile) > 0 {
-			err = ioutil.WriteFile(*outputFile, []byte(fmt.Sprintf("%f", Kbps)), 0666)
-			if err != nil {
-				log.Fatal(err)
+		go func() {
+			for Kbps = range KbpsChan {
+				status = format(Kbps)
 			}
+
+			fmt.Printf("\r%c[2K -> %s\n", 27, status)
+
+			if len(*outputFile) > 0 {
+				err = ioutil.WriteFile(*outputFile, []byte(fmt.Sprintf("%f", Kbps)), 0666)
+				if err != nil {
+					log.Fatal(err)
+				}
+			}
+
+			close(done)
+		}()
+
+		err = fastCom.Measure(urls, KbpsChan)
+		if err != nil {
+			log.Fatal(err)
 		}
 
-		close(done)
-	}()
+		<-done
 
-	err = fastCom.Measure(urls, KbpsChan)
-	if err != nil {
-		log.Fatal(err)
+		tp.stop()
+
+		if Kbps > 0 {
+			res = append(res, Kbps)
+		}
 	}
 
-	<-done
+	log.Println("Results:")
+	for _, Kbps := range res {
+		fmt.Println(format(Kbps))
+	}
 }
 
 func format(Kbps float64) string {
