@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
+	"net/http"
 	"time"
 
 	"github.com/ddo/go-spin"
@@ -19,7 +22,7 @@ var (
 func main() {
 	numTests := flag.Int("n", 1, "number of tests")
 	seedHex := flag.String("s", "", "wallet secret seed")
-	outputFile := flag.String("o", "", "write result to file in unit of Kbps")
+	uploadURL := flag.String("upload", "", "upload result to server")
 	version := flag.Bool("version", false, "print version")
 
 	flag.Parse()
@@ -50,87 +53,118 @@ func main() {
 	res := make([]float64, 0, *numTests)
 
 	for i := 0; i < *numTests; i++ {
-		port, err := getFreePort()
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		tp, err := newTunaProxy(seed, port)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		err = tp.start()
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		for i := 5; i > 0; i-- {
-			status = fmt.Sprintf("starting speedtest in %ds", i)
-			time.Sleep(time.Second)
-		}
-
-		status = "starting speedtest"
-
-		fastCom, err := fast.New(fmt.Sprintf("http://127.0.0.1:%d", port))
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		err = fastCom.Init()
-		if err != nil {
-			log.Fatal(err)
-			return
-		}
-
-		status = "connecting"
-
-		urls, err := fastCom.GetUrls()
-		if err != nil {
-			log.Fatal(err)
-			return
-		}
-
-		status = "loading"
-
-		KbpsChan := make(chan float64)
-		done := make(chan struct{})
-
-		var Kbps float64
-		go func() {
-			for Kbps = range KbpsChan {
-				status = format(Kbps)
+		err := func() error {
+			port, err := getFreePort()
+			if err != nil {
+				return err
 			}
 
-			fmt.Printf("\r%c[2K -> %s\n", 27, status)
+			tp, err := newTunaProxy(seed, port)
+			if err != nil {
+				return err
+			}
 
-			if len(*outputFile) > 0 {
-				err = ioutil.WriteFile(*outputFile, []byte(fmt.Sprintf("%f", Kbps)), 0666)
-				if err != nil {
-					log.Fatal(err)
+			err = tp.start()
+			if err != nil {
+				return err
+			}
+
+			for i := 5; i > 0; i-- {
+				status = fmt.Sprintf("starting speedtest in %ds", i)
+				time.Sleep(time.Second)
+			}
+
+			status = "starting speedtest"
+
+			fastCom, err := fast.New(fmt.Sprintf("http://127.0.0.1:%d", port))
+			if err != nil {
+				return err
+			}
+
+			err = fastCom.Init()
+			if err != nil {
+				return err
+			}
+
+			status = "connecting"
+
+			urls, err := fastCom.GetUrls()
+			if err != nil {
+				return err
+			}
+
+			status = "loading"
+
+			KbpsChan := make(chan float64)
+			done := make(chan struct{})
+
+			var Kbps float64
+			go func() {
+				for Kbps = range KbpsChan {
+					status = format(Kbps)
 				}
+				fmt.Printf("\r%c[2K -> %s\n", 27, status)
+				close(done)
+			}()
+
+			err = fastCom.Measure(urls, KbpsChan)
+			if err != nil {
+				return err
 			}
 
-			close(done)
+			<-done
+
+			tp.stop()
+
+			if Kbps > 0 {
+				res = append(res, Kbps)
+			}
+
+			return nil
 		}()
-
-		err = fastCom.Measure(urls, KbpsChan)
 		if err != nil {
-			log.Fatal(err)
+			log.Println(err)
 		}
+	}
 
-		<-done
-
-		tp.stop()
-
-		if Kbps > 0 {
-			res = append(res, Kbps)
-		}
+	if len(res) == 0 {
+		return
 	}
 
 	log.Println("Results:")
 	for _, Kbps := range res {
 		fmt.Println(format(Kbps))
+	}
+
+	if len(*uploadURL) > 0 {
+		b, err := json.Marshal(struct {
+			Throughput []float64
+		}{
+			Throughput: res,
+		})
+		if err != nil {
+			log.Fatalf("Upload results error: %v", err)
+		}
+
+		client := &http.Client{
+			Timeout: 30 * time.Second,
+		}
+
+		resp, err := client.Post(*uploadURL, "application/json", bytes.NewBuffer(b))
+		if err != nil {
+			log.Fatalf("Upload results error: %v", err)
+		}
+
+		defer resp.Body.Close()
+
+		body, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			log.Fatalf("Read response error: %v", err)
+		}
+
+		if len(body) > 0 {
+			log.Println(string(body))
+		}
 	}
 }
 
